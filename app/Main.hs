@@ -8,7 +8,7 @@
 module Main where
 
 import qualified Sound.Pulse.Simple as Pulse
-import Control.Exception (bracket)
+import Control.Exception (bracket, finally)
 import qualified Math.FFT as FFT
 import Data.Array.IArray (amap, listArray)
 import qualified Data.Array.IArray as IArray
@@ -27,8 +27,10 @@ import Data.Maybe (isJust)
 import qualified Data.Aeson as Aeson
 import qualified Data.Aeson.TH as Aeson.TH
 import qualified Data.Yaml as Yaml
+import qualified Data.Yaml.Pretty as Yaml.Pretty
 import System.Environment (getArgs)
-import Debug.Trace
+import Data.IORef
+import qualified Data.ByteString.Char8 as BSC8
 
 -- key presses
 -- --------------------------------------------------------------------
@@ -84,7 +86,6 @@ numSamples = 512
 fftFreqs :: [Float]
 fftFreqs = 0 : (do
   let binWidth :: Float = fromIntegral sampleRate / fromIntegral numSamples
-  traceM ("bin width: " ++ show binWidth)
   ix <- fromIntegral <$> [1..numSamples]
   let freq = binWidth * ix
   -- filter frequencies above 2000, they're not very useful for what
@@ -110,45 +111,64 @@ instance Aeson.FromJSON Graph where
 
 data Params = Params
   { paramsAmplitudeCoefficient :: GLfloat
-  , paramsControls :: Maybe (String, String) -- ^ what to press when low and high
-  , paramsPrintBestFreq :: Bool -- ^ wether to print what the chosen frequency
-  , paramsAmplitudeTreshold :: GLfloat -- ^ what the minimum scaled peak frequency should be to trigger high / low
-  , paramsGraph :: Graph
+  , paramsAmplitudeLowTreshold :: GLfloat
+  , paramsAmplitudeHighTreshold :: GLfloat
+  -- ^ what the minimum scaled peak frequency should be to trigger high / low
+  , paramsFrequncyTreshold :: GLfloat
   } deriving (Eq, Show)
-Aeson.TH.deriveFromJSON
+Aeson.TH.deriveJSON
   Aeson.defaultOptions{ Aeson.fieldLabelModifier = drop (length ("params" :: String))}
   ''Params
 
+data Options = Options
+  { optionsPrintBestFreq :: Bool -- ^ wether to print what the chosen frequency
+  , optionsControls :: Maybe (String, String) -- ^ what to press when low and high
+  , optionsGraph :: Graph
+  } deriving (Eq, Show)
+Aeson.TH.deriveFromJSON
+  Aeson.defaultOptions{ Aeson.fieldLabelModifier = drop (length ("options" :: String))}
+  ''Options
+
 data Frame = Frame
   { frameAudio :: [GLfloat]
-  , frameFrequencies :: [GLfloat] -- ^ the frequencies amplitudes are scaled by paramsAmplitudeCoefficient
+  , frameFrequencies :: [GLfloat]
+  -- ^ the frequencies amplitudes are scaled by paramsAmplitudeCoefficient
   }
+
+-- returns the unscaled frame
+readFrame :: Pulse.Simple -> IO Frame
+readFrame spl = do
+  frameAudio <- Pulse.simpleRead spl numSamples
+  let frameFrequencies = take (length fftFreqs) (fft frameAudio)
+  return Frame{..}
 
 audioFreqs :: Pulse.Simple -> Params -> Producer Frame IO void
 audioFreqs spl Params{..} = forever $ do
-  frameAudio <- lift (Pulse.simpleRead spl numSamples)
-  let frameFrequencies = take (length fftFreqs) (map (* paramsAmplitudeCoefficient) (fft frameAudio))
-  yield Frame{..}
+  frame <- lift (readFrame spl)
+  yield frame{ frameFrequencies = map (* paramsAmplitudeCoefficient) (frameFrequencies frame) }
 
 data LowHigh = Low | High
   deriving (Eq, Show)
 
-computeLowHigh :: Params -> [GLfloat] -> IO (Maybe LowHigh)
-computeLowHigh Params{..} freqs = do
-  let weightedAvg = sum (zipWith (*) fftFreqs freqs)
+computeLowHigh :: Options -> Params -> [GLfloat] -> IO (Maybe LowHigh)
+computeLowHigh Options{..} Params{..} freqs = do
+  let weightedAvg = sum (zipWith (*) fftFreqs freqs) / sum freqs
   let mbLowHigh = do
-        guard (maximum freqs > paramsAmplitudeTreshold)
-        return (if weightedAvg < 650 then Low else High)
-  when (paramsPrintBestFreq && isJust mbLowHigh) $ do
+        let lowHigh = if weightedAvg < paramsFrequncyTreshold then Low else High
+        guard $ case lowHigh of
+          Low -> maximum freqs > paramsAmplitudeLowTreshold
+          High -> maximum freqs > paramsAmplitudeHighTreshold
+        return lowHigh
+  when (optionsPrintBestFreq && isJust mbLowHigh) $ do
     putStrLn ("best freq: " ++ show weightedAvg)
   return mbLowHigh
 
-control :: Params -> Pipe Frame Frame IO ()
-control params@Params{..} = go Nothing
+control :: Options -> Params -> Pipe Frame Frame IO ()
+control options@Options{..} params@Params{..} = go Nothing
   where
     go mbLowHigh = do
       frame@(Frame _ freqs) <- await
-      newMbLowHigh <- lift (computeLowHigh params freqs)
+      newMbLowHigh <- lift (computeLowHigh options params freqs)
       lift $ case (mbLowHigh, newMbLowHigh) of
         (Nothing, Nothing) -> return ()
         (Nothing, Just newLowHigh) -> do
@@ -165,7 +185,7 @@ control params@Params{..} = go Nothing
       yield frame
       go newMbLowHigh
 
-    keyPress lowHigh = for_ paramsControls $ \(lowKey, highKey) -> case lowHigh of
+    keyPress lowHigh = for_ optionsControls $ \(lowKey, highKey) -> case lowHigh of
       Low -> do
         Just keyCode <- return (keyCodeToX11KeySym lowKey)
         fakeKeyPress keyCode
@@ -173,7 +193,7 @@ control params@Params{..} = go Nothing
         Just keyCode <- return (keyCodeToX11KeySym highKey)
         fakeKeyPress keyCode
 
-    keyRelease lowHigh = for_ paramsControls $ \(lowKey, highKey) -> case lowHigh of
+    keyRelease lowHigh = for_ optionsControls $ \(lowKey, highKey) -> case lowHigh of
       Low -> do
         Just keyCode <- return (keyCodeToX11KeySym lowKey)
         fakeKeyRelease keyCode
@@ -217,26 +237,51 @@ control params@Params{..} = go Nothing
         fakeKeyRelease keyCode
     -}
 
+calibrate :: Pulse.Simple -> IORef GLfloat -> Producer Frame IO void
+calibrate spl maxFreqRef = forever $ do
+  maxFreq <- lift (readIORef maxFreqRef)
+  frame <- lift (readFrame spl)
+  lift (writeIORef maxFreqRef (max maxFreq (maximum (frameFrequencies frame))))
+  yield frame
+
 main :: IO ()
 main = do
-  [cfg] <- getArgs
-  params <- either (error . Yaml.prettyPrintParseException) id <$> Yaml.decodeFileEither cfg
-  fakeKeyInit
   bracket
     (Pulse.simpleNew
       Nothing "pitch-control" Pulse.Record Nothing "Pitch controls for your keyboard"
       (Pulse.SampleSpec (Pulse.F32 Pulse.LittleEndian) sampleRate 1) Nothing Nothing)
     Pulse.simpleFree
     (\spl -> exceptT error return $ do
-        res <- lift setupGLFW
-        unless res (error "Unable to initilize GLFW")
-        render <- window 1024 480 $ fmap pipeify $ case paramsGraph params of
-          Frequency -> renderFilledLine (length fftFreqs) jet_mod
-          Audio -> renderLine numSamples 1024
-        let data_ = Pipes.map $ case paramsGraph params of
-              Frequency -> frameFrequencies
-              Audio -> map ((+ 0.5) . (/ 2)) . frameAudio
-        lift (runEffect (audioFreqs spl params >-> control params >-> data_ >-> render)))
+      res <- lift setupGLFW
+      unless res (error "Unable to initilize GLFW")
+      args <- lift getArgs
+      case args of
+        ["calibrate"] -> do
+          maxFreqRef <- lift (newIORef 0)
+          render <- window 1024 480 (fmap pipeify (renderFilledLine (length fftFreqs) jet_mod))
+          let tranformFreqs = forever $ do
+                frame <- await
+                maxFreq <- lift (readIORef maxFreqRef)
+                yield (map (/ maxFreq) (frameFrequencies frame))
+          lift $ finally (runEffect (calibrate spl maxFreqRef >-> tranformFreqs >-> render)) $ do
+            maxFreq <- readIORef maxFreqRef
+            BSC8.putStrLn $ Yaml.Pretty.encodePretty Yaml.Pretty.defConfig Params
+              { paramsAmplitudeCoefficient = 1 / maxFreq
+              , paramsAmplitudeLowTreshold = 0.1
+              , paramsAmplitudeHighTreshold = 0.2
+              , paramsFrequncyTreshold = 700
+              }
+        ["run", paramsFile, optionsFile] -> do
+          params <- lift (either (error . Yaml.prettyPrintParseException) id <$> Yaml.decodeFileEither paramsFile)
+          options <- lift (either (error . Yaml.prettyPrintParseException) id <$> Yaml.decodeFileEither optionsFile)
+          lift fakeKeyInit
+          render <- window 1024 480 $ fmap pipeify $ case optionsGraph options of
+            Frequency -> renderFilledLine (length fftFreqs) jet_mod
+            Audio -> renderLine numSamples 1024
+          let data_ = Pipes.map $ case optionsGraph options of
+                Frequency -> frameFrequencies
+                Audio -> map ((+ 0.5) . (/ 2)) . frameAudio
+          lift (runEffect (audioFreqs spl params >-> control options params >-> data_ >-> render)))
 
 {-
 main :: IO ()

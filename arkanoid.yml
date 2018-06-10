@@ -1,3 +1,3 @@
 PrintBestFreq: true
-# Controls: [ArrowLeft, ArrowRight]
+Controls: [ArrowLeft, ArrowRight]
 Graph: Frequency

@@ -1,5 +1,6 @@
+AmplitudeHighTreshold: 0.2
+FrequncyTreshold: 700
 AmplitudeCoefficient: 0.02
-AmplitudeTreshold: 0.3
-PrintBestFreq: true
-# Controls: [ArrowLeft, ArrowRight]
-Graph: Frequency
+# AmplitudeCoefficient: 0.1
+AmplitudeLowTreshold: 0.1
+
