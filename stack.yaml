@@ -1,0 +1,7 @@
+resolver: lts-11.12
+packages:
+- .
+extra-deps:
+- pulse-simple-0.1.14
+- dynamic-graph-0.1.0.12
+- GLUtil-0.10.1

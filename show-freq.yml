@@ -1,0 +1,5 @@
+AmplitudeCoefficient: 0.02
+AmplitudeTreshold: 0.3
+PrintBestFreq: false
+# Controls: [ArrowLeft, ArrowRight]
+Graph: Frequency
