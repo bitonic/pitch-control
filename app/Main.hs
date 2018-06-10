@@ -201,42 +201,6 @@ control options@Options{..} params@Params{..} = go Nothing
         Just keyCode <- return (keyCodeToX11KeySym highKey)
         fakeKeyRelease keyCode
 
-    {-
-    {- ARKANOID -}
-    keyPress = \case
-      KSLeft -> do
-        Just keyCode <- return (keyCodeToX11KeySym "ArrowLeft")
-        fakeKeyPress keyCode
-      KSRight -> do
-        Just keyCode <- return (keyCodeToX11KeySym "ArrowRight")
-        fakeKeyPress keyCode
-    keyRelease = \case
-      KSLeft -> do
-        Just keyCode <- return (keyCodeToX11KeySym "ArrowLeft")
-        fakeKeyRelease keyCode
-      KSRight -> do
-        Just keyCode <- return (keyCodeToX11KeySym "ArrowRight")
-        fakeKeyRelease keyCode
-    -}
-
-    {- ROBOT UNICORN -}
-    {-
-    keyPress = \case
-      KSLeft -> do
-        Just keyCode <- return (keyCodeToX11KeySym "KeyZ")
-        fakeKeyPress keyCode
-      KSRight -> do
-        Just keyCode <- return (keyCodeToX11KeySym "KeyX")
-        fakeKeyPress keyCode
-    keyRelease = \case
-      KSLeft -> do
-        Just keyCode <- return (keyCodeToX11KeySym "KeyZ")
-        fakeKeyRelease keyCode
-      KSRight -> do
-        Just keyCode <- return (keyCodeToX11KeySym "KeyX")
-        fakeKeyRelease keyCode
-    -}
-
 calibrate :: Pulse.Simple -> IORef GLfloat -> Producer Frame IO void
 calibrate spl maxFreqRef = forever $ do
   maxFreq <- lift (readIORef maxFreqRef)
@@ -283,18 +247,3 @@ main = do
                 Audio -> map ((+ 0.5) . (/ 2)) . frameAudio
           lift (runEffect (audioFreqs spl params >-> control options params >-> data_ >-> render)))
 
-{-
-main :: IO ()
-main = do
-  fakeKeyInit
-  bracket
-    (simpleNew Nothing "pitch-control" Record Nothing "Pitch controls for your keyboard"
-      (SampleSpec (F32 LittleEndian) sampleRate 1) Nothing Nothing)
-    simpleFree
-    (\spl -> exceptT error return $ do
-        res <- lift setupGLFW
-        unless res (error "Unable to initilize GLFW")
-        pangoCtx <- lift (cairoCreateContext Nothing)
-        render <- window 1024 480 (pipeify <$> renderFilledLine (length fftFreqs) jet_mod)
-        lift (runEffect (audioFreqs spl >-> control >-> render)))
--}
